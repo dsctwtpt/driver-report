@@ -105,7 +105,7 @@ input,select{width:100%;font:inherit;font-size:18px;padding:13px;border:1.5px so
 (function(){
 'use strict';
 const C = window.APP_CONFIG || {};
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const DEMO = !C.LIFF_ID || new URLSearchParams(location.search).has('demo');
 const LS_STATE = 'dr_state_v1', LS_QUEUE = 'dr_queue_v1';
 const ACTION_LABEL = {GATE:'抵達哨口', DOCK:'抵達碼頭', DONE:'完成交貨'};
@@ -279,6 +279,7 @@ function checkAutoClose(){
 function baseEv(stop){ const t=S.trip; return {tripId:t.tripId, orders:t.orders, siteId:stop?stop.siteId:'', siteName:stop?stop.siteName:'', siteType:stop?stop.type:''}; }
 
 function startTrip(){
+  stopScanner();
   const orders=[...S.draft];
   S.trip={tripId:uuid(), startedAt:nowIso(), orders, stops:[], current:null, askNext:false};
   S.draft=[]; persist(); stopScanner();
@@ -351,14 +352,39 @@ function addOrder(raw, fromScan){
 }
 function startScanner(){
   if(DEMO && !window.Html5Qrcode) return;
-  if(!window.Html5Qrcode){ $('#reader').innerHTML='<div class="scan-hint">掃描元件載入失敗，請用下方「手動輸入」</div>'; return; }
+  if(!window.Html5Qrcode){ $('#reader').innerHTML='<div class="scan-hint">掃描元件載入失敗，請用「拍照掃描」或「手動輸入」</div>'; return; }
   const F=Html5QrcodeSupportedFormats;
-  scanner=new Html5Qrcode('reader',{formatsToSupport:[F.CODE_128,F.CODE_39,F.CODE_93,F.EAN_13,F.ITF,F.CODABAR,F.QR_CODE], verbose:false});
-  scanner.start({facingMode:'environment'}, {fps:12, qrbox:(w,h)=>({width:Math.floor(w*0.85), height:Math.floor(Math.min(h,w)*0.4)})},
-    txt=>addOrder(txt,true), ()=>{})
-  .catch(err=>{ $('#reader').innerHTML='<div class="scan-hint">無法開啟相機，請允許 LINE 使用相機，或用下方「手動輸入」</div>'; console.warn(err); });
+  const s=new Html5Qrcode('reader',{formatsToSupport:[F.CODE_128,F.CODE_39,F.CODE_93,F.EAN_13,F.ITF,F.CODABAR,F.QR_CODE], verbose:false});
+  scanner=s;
+  try{
+    s.start({facingMode:'environment'}, {fps:12, qrbox:(w,h)=>({width:Math.floor(w*0.85), height:Math.floor(Math.min(h,w)*0.4)})},
+      txt=>addOrder(txt,true), ()=>{})
+    .catch(err=>{ if(scanner===s) scanner=null; cameraFailed(err); });
+  }catch(err){ if(scanner===s) scanner=null; cameraFailed(err); }
 }
-function stopScanner(){ if(scanner){ const s=scanner; scanner=null; s.stop().then(()=>s.clear()).catch(()=>{}); } }
+function cameraFailed(err){
+  console.warn(err);
+  const r=$('#reader'); if(!r) return;
+  r.innerHTML='<div class="scan-hint" style="position:static;padding:40px 12px">即時相機無法開啟<br>請改按下方「拍照掃描」</div>';
+  r.style.minHeight='0';
+}
+function stopScanner(){
+  if(!scanner) return;
+  const s=scanner; scanner=null;
+  try{ const p=s.stop(); if(p&&p.then) p.then(()=>{ try{s.clear();}catch(e){} }).catch(()=>{}); }catch(e){}
+}
+async function scanPhoto(file){
+  if(!file) return;
+  if(!window.Html5Qrcode){ toast('掃描元件載入失敗，請手動輸入'); return; }
+  toast('辨識中…',1200);
+  const F=Html5QrcodeSupportedFormats;
+  try{
+    const q=new Html5Qrcode('reader-file',{formatsToSupport:[F.CODE_128,F.CODE_39,F.CODE_93,F.EAN_13,F.ITF,F.CODABAR,F.QR_CODE], verbose:false});
+    const r=await q.scanFileV2(file,false);
+    try{ q.clear(); }catch(e){}
+    addOrder(r.decodedText,false);
+  }catch(e){ vibrate([60,60,60]); toast('照片裡找不到條碼，請拍近一點、拍清楚，或手動輸入',3000); }
+}
 
 // ---------- views ----------
 let view='loading';
@@ -412,6 +438,8 @@ const VIEWS = {
     app.innerHTML=`<div class="card"><h2>掃描車單條碼</h2>
       <div id="reader"><div class="scan-hint">對準條碼，掃到會震動</div></div>
       ${DEMO?'<button class="btn" id="fakeScan" style="margin-top:10px">（示範）模擬掃到一張車單</button>':''}
+      <label class="btn" style="margin-top:10px;text-align:center;font-weight:700">📷 拍照掃描<input type="file" accept="image/*" capture="environment" id="photoScan" style="display:none"></label>
+      <div id="reader-file" style="display:none"></div>
       <div class="links"><button id="manual">條碼掃不到？手動輸入</button></div></div>
       <div class="card"><h2>已掃描 <span id="cnt">0</span> 張</h2><div class="chips" id="draft"></div></div>
       <button class="big navy" id="startBtn">出車</button>
@@ -419,6 +447,7 @@ const VIEWS = {
     renderDraft();
     $('#manual').onclick=()=>openSheet(`<h2>手動輸入車單號</h2><input id="mIn" placeholder="輸入車單號" style="text-transform:uppercase"><button class="btn primary" id="mOk" style="margin-top:12px">加入</button><button class="btn ghost" data-close>取消</button>`,
       r=>{ const i=r.querySelector('#mIn'); i.focus(); r.querySelector('#mOk').onclick=()=>{ addOrder(i.value,false); i.value=''; closeSheet(); }; });
+    $('#photoScan').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; scanPhoto(f); };
     if(DEMO) $('#fakeScan').onclick=()=>addOrder('DSC'+String(Math.floor(Math.random()*1e8)).padStart(8,'0'),true);
     $('#startBtn').onclick=()=>{ if(!S.draft.length) return toast('請先掃描至少一張車單'); startTrip(); };
     $('#backHome').onclick=()=>go('home');
