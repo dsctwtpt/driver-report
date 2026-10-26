@@ -59,7 +59,9 @@ input,select{width:100%;font:inherit;font-size:18px;padding:13px;border:1.5px so
 .choice button.sel span{color:#cbd5e1}
 
 #reader{width:100%;border-radius:14px;overflow:hidden;background:#000;min-height:220px;position:relative}
-#reader video{width:100%!important;display:block}
+#reader video{width:100%;display:block;max-height:60vh;object-fit:cover}
+.scan-frame{position:absolute;left:5%;right:5%;top:50%;height:42%;transform:translateY(-50%);border:3px solid rgba(255,255,255,.9);border-radius:10px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none}
+.scan-frame::after{content:"";position:absolute;left:4%;right:4%;top:50%;height:2px;background:#ef4444}
 .scan-hint{position:absolute;inset:auto 0 10px 0;text-align:center;color:#fff;font-size:14px;text-shadow:0 1px 2px #000}
 .flash{animation:flash .4s}
 @keyframes flash{0%{background:#bbf7d0}100%{background:#eef2f7}}
@@ -99,7 +101,7 @@ input,select{width:100%;font:inherit;font-size:18px;padding:13px;border:1.5px so
 <div id="sheetRoot"></div>
 
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/zxing-wasm@2.1.2/dist/iife/reader/index.js"></script>
 <script>
 // 每次開啟都抓最新的設定與程式，避免 LINE 快取舊版
 (function(){var v=Date.now();function L(src,cb){var s=document.createElement('script');s.src=src+'?v='+v;s.onload=cb||null;s.onerror=function(){document.getElementById('app').innerHTML='<div class="card center"><h1>載入失敗</h1><p class="muted">請檢查網路後重新開啟</p></div>';};document.body.appendChild(s);}

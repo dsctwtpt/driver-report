@@ -1,7 +1,7 @@
 (function(){
 'use strict';
 const C = window.APP_CONFIG || {};
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.1.0';
 const DEMO = !C.LIFF_ID || new URLSearchParams(location.search).has('demo');
 const LS_STATE = 'dr_state_v1', LS_QUEUE = 'dr_queue_v1';
 const ACTION_LABEL = {GATE:'抵達哨口', DOCK:'抵達碼頭', DONE:'完成交貨'};
@@ -231,54 +231,94 @@ function endTrip(){
   S.trip=null; S.lastUndo=null; persist(); closeSheet(); go('finished');
 }
 
-// ---------- scanner ----------
+// ---------- scanner（zxing-wasm：比舊引擎更能讀一維條碼） ----------
+const ZX_FORMATS=['Code128','Code39','Code93','ITF','EAN13','Codabar','QRCode'];
+const ZX_OPTS={formats:ZX_FORMATS,tryHarder:true,tryRotate:true,tryInvert:false,maxNumberOfSymbols:1};
 let scanner=null, lastCode='', lastCodeAt=0;
+function normalizeCode(raw){
+  let c=String(raw||'').trim().toUpperCase().replace(/\s+/g,'');
+  // 車單條碼內含一個前導 0（例：條碼 08861001770620，印出來是 8861001770620），統一成印出來的號碼
+  if(/^\d+$/.test(c)) c=c.replace(/^0+(?=\d)/,'');
+  return c;
+}
 function validOrder(code){
   if(!C.ORDER_PATTERN) return true;
   try{ return new RegExp(C.ORDER_PATTERN).test(code); }catch(e){ return true; }
 }
 function addOrder(raw, fromScan){
-  const code=String(raw||'').trim().toUpperCase(); if(!code) return;
+  const code=normalizeCode(raw); if(!code) return false;
   const now=Date.now();
-  if(fromScan && code===lastCode && now-lastCodeAt<2500) return;
+  if(fromScan && code===lastCode && now-lastCodeAt<2500) return false;
   lastCode=code; lastCodeAt=now;
-  if(!validOrder(code)){ vibrate([60,60,60]); toast('不是車單條碼：'+code); return; }
-  if(S.draft.includes(code)){ if(!fromScan) toast('已經掃過了'); return; }
-  S.draft.push(code); persist(); vibrate(70); renderDraft(true);
+  if(!validOrder(code)){ vibrate([60,60,60]); toast('不是車單條碼：'+code); return false; }
+  if(S.draft.includes(code)){ if(!fromScan) toast('已經掃過了'); return false; }
+  S.draft.push(code); persist(); vibrate(70); renderDraft(true); toast('已加入 '+code,1200);
+  return true;
 }
-function startScanner(){
-  if(DEMO && !window.Html5Qrcode) return;
-  if(!window.Html5Qrcode){ $('#reader').innerHTML='<div class="scan-hint">掃描元件載入失敗，請用「拍照掃描」或「手動輸入」</div>'; return; }
-  const F=Html5QrcodeSupportedFormats;
-  const s=new Html5Qrcode('reader',{formatsToSupport:[F.CODE_128,F.CODE_39,F.CODE_93,F.EAN_13,F.ITF,F.CODABAR,F.QR_CODE], verbose:false});
-  scanner=s;
+function zxReady(){ return !!(window.ZXingWASM && ZXingWASM.readBarcodesFromImageData); }
+function preloadZx(){ try{ if(zxReady()) ZXingWASM.prepareZXingModule({fireImmediately:true}); }catch(e){} }
+async function startScanner(){
+  const box=$('#reader'); if(!box) return;
+  if(!zxReady()){ cameraFailed('engine'); return; }
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ cameraFailed('no media'); return; }
+  const st={stream:null, video:null, timer:null, busy:false, stopped:false};
+  scanner=st;
   try{
-    s.start({facingMode:'environment'}, {fps:12, qrbox:(w,h)=>({width:Math.floor(w*0.85), height:Math.floor(Math.min(h,w)*0.4)})},
-      txt=>addOrder(txt,true), ()=>{})
-    .catch(err=>{ if(scanner===s) scanner=null; cameraFailed(err); });
-  }catch(err){ if(scanner===s) scanner=null; cameraFailed(err); }
+    st.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}});
+  }catch(e){ if(scanner===st) scanner=null; cameraFailed(e); return; }
+  if(st.stopped||scanner!==st){ st.stream.getTracks().forEach(t=>t.stop()); return; }
+  try{ const tr=st.stream.getVideoTracks()[0], cap=tr.getCapabilities?tr.getCapabilities():{};
+    if(cap.focusMode&&cap.focusMode.includes('continuous')) await tr.applyConstraints({advanced:[{focusMode:'continuous'}]}); }catch(e){}
+  const v=document.createElement('video'); v.setAttribute('playsinline',''); v.muted=true; v.autoplay=true; v.srcObject=st.stream; st.video=v;
+  box.innerHTML=''; box.appendChild(v);
+  box.insertAdjacentHTML('beforeend','<div class="scan-frame"></div><div class="scan-hint">把條碼放進框內，掃到會震動</div>');
+  try{ await v.play(); }catch(e){}
+  const cv=document.createElement('canvas'), ctx=cv.getContext('2d',{willReadFrequently:true});
+  const tick=async()=>{
+    if(st.stopped) return;
+    if(!st.busy && v.readyState>=2 && v.videoWidth){
+      st.busy=true;
+      try{
+        const W=v.videoWidth,H=v.videoHeight, cw=Math.round(W*0.9), ch=Math.round(Math.min(H, W*0.45));
+        const sx=Math.round((W-cw)/2), sy=Math.round((H-ch)/2);
+        const k=Math.min(1, 1600/cw); cv.width=Math.round(cw*k); cv.height=Math.round(ch*k);
+        ctx.drawImage(v,sx,sy,cw,ch,0,0,cv.width,cv.height);
+        const res=await ZXingWASM.readBarcodesFromImageData(ctx.getImageData(0,0,cv.width,cv.height),ZX_OPTS);
+        if(res&&res.length&&res[0].text){ addOrder(res[0].text,true); }
+      }catch(e){ console.warn('scan',e); }
+      st.busy=false;
+    }
+    st.timer=setTimeout(tick,120);
+  };
+  tick();
 }
 function cameraFailed(err){
   console.warn(err);
   const r=$('#reader'); if(!r) return;
-  r.innerHTML='<div class="scan-hint" style="position:static;padding:40px 12px">即時相機無法開啟<br>請改按下方「拍照掃描」</div>';
+  r.innerHTML='<div class="scan-hint" style="position:static;padding:40px 12px">即時相機無法開啟<br>請改按下方「拍照掃描」或「手動輸入」</div>';
   r.style.minHeight='0';
 }
 function stopScanner(){
   if(!scanner) return;
-  const s=scanner; scanner=null;
-  try{ const p=s.stop(); if(p&&p.then) p.then(()=>{ try{s.clear();}catch(e){} }).catch(()=>{}); }catch(e){}
+  const st=scanner; scanner=null; st.stopped=true;
+  clearTimeout(st.timer);
+  try{ st.stream&&st.stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  try{ if(st.video) st.video.srcObject=null; }catch(e){}
 }
 async function scanPhoto(file){
   if(!file) return;
-  if(!window.Html5Qrcode){ toast('掃描元件載入失敗，請手動輸入'); return; }
-  toast('辨識中…',1200);
-  const F=Html5QrcodeSupportedFormats;
+  if(!zxReady()){ toast('掃描元件載入失敗，請手動輸入'); return; }
+  toast('辨識中…',1500);
   try{
-    const q=new Html5Qrcode('reader-file',{formatsToSupport:[F.CODE_128,F.CODE_39,F.CODE_93,F.EAN_13,F.ITF,F.CODABAR,F.QR_CODE], verbose:false});
-    const r=await q.scanFileV2(file,false);
-    try{ q.clear(); }catch(e){}
-    addOrder(r.decodedText,false);
+    let res=await ZXingWASM.readBarcodes(file,ZX_OPTS);
+    if(!res||!res.length){ // 大照片縮小再試一次
+      const bmp=await createImageBitmap(file); const k=Math.min(1,1800/Math.max(bmp.width,bmp.height));
+      const c=document.createElement('canvas'); c.width=Math.round(bmp.width*k); c.height=Math.round(bmp.height*k);
+      const g=c.getContext('2d'); g.drawImage(bmp,0,0,c.width,c.height);
+      res=await ZXingWASM.readBarcodesFromImageData(g.getImageData(0,0,c.width,c.height),ZX_OPTS);
+    }
+    if(res&&res.length&&res[0].text){ addOrder(res[0].text,false); return; }
+    throw new Error('none');
   }catch(e){ vibrate([60,60,60]); toast('照片裡找不到條碼，請拍近一點、拍清楚，或手動輸入',3000); }
 }
 
@@ -332,10 +372,9 @@ const VIEWS = {
   },
   scan(){
     app.innerHTML=`<div class="card"><h2>掃描車單條碼</h2>
-      <div id="reader"><div class="scan-hint">對準條碼，掃到會震動</div></div>
+      <div id="reader"><div class="scan-hint">相機開啟中…</div></div>
       ${DEMO?'<button class="btn" id="fakeScan" style="margin-top:10px">（示範）模擬掃到一張車單</button>':''}
       <label class="btn" style="margin-top:10px;text-align:center;font-weight:700">📷 拍照掃描<input type="file" accept="image/*" capture="environment" id="photoScan" style="display:none"></label>
-      <div id="reader-file" style="display:none"></div>
       <div class="links"><button id="manual">條碼掃不到？手動輸入</button></div></div>
       <div class="card"><h2>已掃描 <span id="cnt">0</span> 張</h2><div class="chips" id="draft"></div></div>
       <button class="big navy" id="startBtn">出車</button>
@@ -480,7 +519,7 @@ function showToday(){
 // ---------- boot ----------
 async function boot(){
   if(DEMO) $('#demoBar').classList.remove('hidden');
-  startGps(); updateSync();
+  startGps(); updateSync(); preloadZx();
   try{
     if(!DEMO){
       await liff.init({liffId:C.LIFF_ID});
